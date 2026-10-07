@@ -166,7 +166,7 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 	before := len(c.applied[l])
 	c.crash(l)
 	c.restart(l)
-	c.steps(20) // 集群重新选举（可能是新领导者），提交继续推进
+	c.steps(20)                             // 集群重新选举（可能是新领导者），提交继续推进
 	if got := len(c.applied[l]); got != 1 { // 重启后状态机只应应用快照之后的 k3
 		t.Fatalf("restarted leader applied %d entries (%v), want 1 ([k3]); before=%d",
 			got, c.applied[l], before)

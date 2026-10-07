@@ -28,7 +28,11 @@ func (r Role) String() string {
 type LogEntry struct {
 	Term  uint64 // 产生该条目的领导者任期
 	Index uint64 // 日志位点（从 1 开始）
-	Data  []byte // 客户端命令
+	Data  []byte // 客户端命令；nil 同时用于 no-op 与配置条目
+
+	// Config 非 nil 时该条目为成员配置条目（客户端 Data 必须为 nil）。
+	// 配置条目一旦追加到日志即生效（不等提交），按日志复制达成一致。
+	Config *Configuration
 }
 
 // MessageType 节点间消息类型。
@@ -41,14 +45,17 @@ const (
 	MsgAppendEntriesResp
 	MsgInstallSnapshot
 	MsgInstallSnapshotResp
+	MsgPreVote
+	MsgPreVoteResp
 )
 
 // Message 节点间传递的消息（值类型，便于复制与重排注入）。
 type Message struct {
-	Type MessageType
-	From NodeID
-	To   NodeID
-	Term uint64 // 发送方任期
+	Type    MessageType
+	From    NodeID
+	To      NodeID
+	Term    uint64 // 发送方当前任期；PreVote 中为候选人提议的未来任期（不落地）
+	PreVote bool   // 是否为预投票消息（Term 不触发任期步进）
 
 	// RequestVote
 	LastLogIndex uint64

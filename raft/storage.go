@@ -35,6 +35,10 @@ func cloneLog(l []LogEntry) []LogEntry {
 	for i, e := range l {
 		out[i] = e
 		out[i].Data = append([]byte(nil), e.Data...)
+		if e.Config != nil {
+			c := cloneConfig(*e.Config)
+			out[i].Config = &c
+		}
 	}
 	return out
 }

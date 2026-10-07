@@ -18,4 +18,14 @@ var (
 	ErrVersionMismatch = errors.New("raft: snapshot version mismatch")
 	// ErrCompacted 请求的条目已被快照回收。
 	ErrCompacted = errors.New("raft: log compacted")
+	// ErrMembershipChange 已有一次成员变更未完成（配置条目尚未提交/生效）。
+	ErrMembershipChange = errors.New("raft: membership change in progress")
+	// ErrUnknownMember 目标节点不在当前成员集合中。
+	ErrUnknownMember = errors.New("raft: unknown member")
+	// ErrMemberExists 目标节点已在成员集合中。
+	ErrMemberExists = errors.New("raft: member already exists")
+	// ErrNotLearner 目标节点不是学习者，无法直接提升为投票成员。
+	ErrNotLearner = errors.New("raft: member is not a learner")
+	// ErrRejectVote 非投票成员或旧配置成员的投票请求被拒绝。
+	ErrRejectVote = errors.New("raft: vote not permitted by configuration")
 )

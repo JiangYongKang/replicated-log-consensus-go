@@ -76,11 +76,29 @@ func (n *Network) Heal() {
 	n.cut = map[NodeID]map[NodeID]bool{}
 }
 
+// HealPair 恢复 a、b 之间的双向链路（其他切断保持不变）。
+func (n *Network) HealPair(a, b NodeID) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.setCut(a, b, false)
+	n.setCut(b, a, false)
+}
+
 // Pending 返回队列中待投递消息数。
 func (n *Network) Pending() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return len(n.queue)
+}
+
+// PeekFirst 返回队首消息但不取出；队列为空返回 nil 与 false。
+func (n *Network) PeekFirst() (Message, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.queue) == 0 {
+		return Message{}, false
+	}
+	return n.queue[0], true
 }
 
 // DeliverOne 投递队列中的第一条消息；返回 false 表示队列为空。

@@ -40,10 +40,11 @@ func newCluster(t *testing.T, n int) *cluster {
 // startNode 用同一存储（重）建节点，模拟启动或崩溃恢复。
 func (c *cluster) startNode(id NodeID) {
 	cfg := Config{
-		ID:               id,
-		Peers:            c.ids,
-		ElectionTimeout:  10 + indexOf(c.ids, id)*5, // 错峰超时，保证选举确定性
-		HeartbeatTimeout: 2,
+		ID:                 id,
+		Peers:              c.ids,
+		ElectionTimeout:    10 + indexOf(c.ids, id)*5, // 错峰超时，保证选举确定性
+		ElectionTimeoutMax: 19,
+		HeartbeatTimeout:   2,
 	}
 	// 状态机随进程重启而重建：已应用列表清零；
 	// 若存储中有快照，则状态机从快照恢复（快照覆盖的条目不会被重复应用）。
@@ -74,6 +75,40 @@ func indexOf(ids []NodeID, id NodeID) int {
 func (c *cluster) crash(id NodeID) {
 	delete(c.nodes, id)
 	c.net.Attach(id, func(Message) {}) // 消息被丢弃
+}
+
+// addStorage 为一个尚不存在的成员准备持久化存储（但不启动节点）。
+func (c *cluster) addStorage(id NodeID) {
+	if _, ok := c.storages[id]; !ok {
+		c.storages[id] = NewMemoryStorage()
+	}
+	if indexOf(c.ids, id) < 0 {
+		c.ids = append(c.ids, id)
+	}
+}
+
+// startNewNode 以当前已知成员为引导配置启动一个（可能全新的）节点。
+func (c *cluster) startNewNode(id NodeID) {
+	c.addStorage(id)
+	c.startNode(id)
+}
+
+// liveVoters 返回当前在某节点配置中作为投票成员且进程存活的节点集合。
+// 以指定观测节点的当前配置为准。
+func (c *cluster) liveVoters(view NodeID) []NodeID {
+	var out []NodeID
+	conf := c.nodes[view].Configuration()
+	for _, id := range conf.AllPeers() {
+		if _, ok := c.nodes[id]; ok && conf.HasVoter(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// currentConfig 以领导者（或指定存活节点）视角返回当前生效配置。
+func (c *cluster) currentConfig(view NodeID) Configuration {
+	return c.nodes[view].Configuration()
 }
 
 // restart 用保留的存储重建节点，模拟崩溃恢复。
@@ -173,4 +208,34 @@ func (c *cluster) checkAppliedConsistent() {
 	}
 	c.t.Logf("applied consistent across nodes, prefix len=%d (node=%s commit=%d)",
 		len(base), baseID, c.nodes[baseID].Committed())
+}
+
+// checkAppliedConsistentAmong 断言给定成员集合内已应用前缀一致。
+func (c *cluster) checkAppliedConsistentAmong(ids []NodeID) {
+	if len(ids) == 0 {
+		c.t.Fatal("no members to check")
+	}
+	var base []string
+	baseID := ids[0]
+	for _, id := range ids {
+		if _, ok := c.nodes[id]; !ok {
+			continue
+		}
+		if base == nil || len(c.applied[id]) < len(base) {
+			base = c.applied[id]
+			baseID = id
+		}
+	}
+	for _, id := range ids {
+		if _, ok := c.nodes[id]; !ok {
+			continue
+		}
+		a := c.applied[id]
+		for i := range base {
+			if a[i] != base[i] {
+				c.t.Fatalf("applied diverge at %d: %s=%q %s=%q", i, baseID, base[i], id, a[i])
+			}
+		}
+	}
+	c.t.Logf("applied consistent among %v, prefix len=%d", ids, len(base))
 }
