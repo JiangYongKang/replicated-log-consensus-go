@@ -30,30 +30,36 @@ func (t ConfChangeType) String() string {
 	return "Unknown"
 }
 
-// ConfChange 一次成员变更；作为日志条目（EntryConfChange）的 Data 编码存储。
+// ConfChange 一次成员变更（API 层语义）。
+// 写入日志时会被展开为变更后的完整成员集（见 encodeMembership）：
+// 这样任何节点仅凭最后一条变更条目即可还原完整配置，
+// 不依赖"初始配置也在日志里"的假设。
 type ConfChange struct {
 	Type   ConfChangeType
 	NodeID NodeID
 }
 
-// encodeConfChange 编码为紧凑字节串：1 字节类型 + 节点 ID。
-func encodeConfChange(cc ConfChange) []byte {
-	out := make([]byte, 1+len(cc.NodeID))
-	out[0] = byte(cc.Type)
-	copy(out[1:], cc.NodeID)
+// encodeMembership 编码完整成员集（与快照中的编码一致）。
+func encodeMembership(m Membership) []byte {
+	out := encodeIDList(m.sortedVoters())
+	out = append(out, encodeIDList(m.sortedLearners())...)
 	return out
 }
 
-// decodeConfChange 解码；格式非法返回 ErrInvalidConfChange。
-func decodeConfChange(b []byte) (ConfChange, error) {
-	if len(b) < 2 {
-		return ConfChange{}, fmt.Errorf("%w: conf change too short (%d bytes)", ErrInvalidConfChange, len(b))
+// decodeMembership 解码完整成员集；格式非法返回 ErrInvalidConfChange。
+func decodeMembership(b []byte) (Membership, error) {
+	voters, rest, err := decodeIDList(b)
+	if err != nil {
+		return Membership{}, fmt.Errorf("%w: %v", ErrInvalidConfChange, err)
 	}
-	t := ConfChangeType(b[0])
-	if t != ConfAddLearner && t != ConfPromote && t != ConfRemove {
-		return ConfChange{}, fmt.Errorf("%w: unknown conf change type %d", ErrInvalidConfChange, t)
+	learners, rest, err := decodeIDList(rest)
+	if err != nil {
+		return Membership{}, fmt.Errorf("%w: %v", ErrInvalidConfChange, err)
 	}
-	return ConfChange{Type: t, NodeID: NodeID(b[1:])}, nil
+	if len(rest) != 0 {
+		return Membership{}, fmt.Errorf("%w: trailing %d bytes", ErrInvalidConfChange, len(rest))
+	}
+	return membershipFromLists(voters, learners), nil
 }
 
 // Membership 集群成员集合：投票成员 + 学习者。
@@ -222,23 +228,26 @@ func (n *Node) proposeConfChangeLocked(cc ConfChange) (uint64, error) {
 		n.lastErr = ErrNoMajority
 		return 0, fmt.Errorf("%w: only %d/%d voters reachable", ErrNoMajority, active, len(n.membership.Voters))
 	}
+	newM := n.membership.clone()
+	newM.apply(cc)
 	e := LogEntry{
 		Term:  n.term,
 		Index: n.lastLogIndex() + 1,
 		Type:  EntryConfChange,
-		Data:  encodeConfChange(cc),
+		Data:  encodeMembership(newM), // 条目携带变更后的完整成员集
 	}
 	n.log = append(n.log, e)
 	n.matchIdx[n.id] = e.Index
-	n.applyConfChangeLocked(cc, e.Index)
+	n.applyMembershipLocked(newM, cc, e.Index)
 	n.persist()
 	n.broadcastAppend()
 	return e.Index, nil
 }
 
-// applyConfChangeLocked 变更条目追加即生效（单节点变更语义）。
-func (n *Node) applyConfChangeLocked(cc ConfChange, index uint64) {
-	n.membership.apply(cc)
+// applyMembershipLocked 变更条目追加即生效（单节点变更语义）。
+// newM 为条目携带的完整成员集；cc 用于领导者维护复制状态。
+func (n *Node) applyMembershipLocked(newM Membership, cc ConfChange, index uint64) {
+	n.membership = newM
 	n.pendingConfIdx = index
 	if n.role == Leader {
 		switch cc.Type {
@@ -248,9 +257,11 @@ func (n *Node) applyConfChangeLocked(cc ConfChange, index uint64) {
 			n.matchIdx[cc.NodeID] = 0
 			n.lastAck[cc.NodeID] = n.tick
 		case ConfRemove:
-			delete(n.nextIdx, cc.NodeID)
-			delete(n.matchIdx, cc.NodeID)
-			delete(n.lastAck, cc.NodeID)
+			if cc.NodeID != n.id {
+				// 继续向被移除节点复制一段时间，让它得知结果并转入被动，
+				// 而不是无声断连后一直预投票骚扰集群。
+				n.removedPeers[cc.NodeID] = 0 // 0 = 移除尚未提交
+			}
 		}
 	}
 }

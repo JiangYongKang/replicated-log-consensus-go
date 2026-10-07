@@ -56,15 +56,20 @@ type Node struct {
 
 	// 成员管理：membership 由快照成员集 + 日志中的变更条目重放得出，
 	// 追加即生效；pendingConfIdx 为最后一条未确定提交的变更条目位点。
-	membership    Membership
-	snapMember    Membership // 当前快照点对应的成员集
+	membership     Membership
+	snapMember     Membership // 当前快照点对应的成员集
+	committedMember Membership // 已提交位点对应的成员集
 	pendingConfIdx uint64
-	removed       bool // 本节点已被提交的配置移除：完全转为被动
+	removed        bool // 本节点已被提交的配置移除：完全转为被动
 
 	// 领导者视角
 	nextIdx  map[NodeID]uint64
 	matchIdx map[NodeID]uint64
 	lastAck  map[NodeID]uint64 // 各 peer 最近一次回应时的 tick
+	// removedPeers 最近被移除、仍在通知期内的节点：
+	// 值 0 表示移除尚未提交；否则为停止通知的 tick。
+	// 让被移除节点得知结果并转入被动，而不是无声断连。
+	removedPeers map[NodeID]uint64
 
 	lastErr error // 最近一次分类错误（供测试与诊断）
 }
@@ -77,11 +82,12 @@ func NewNode(cfg Config, storage Storage, net Transport, apply ApplyFunc) *Node 
 		net:       net,
 		role:      Follower,
 		applyFn:   apply,
-		votesRecv: map[NodeID]bool{},
-		preVotes:  map[NodeID]bool{},
-		nextIdx:   map[NodeID]uint64{},
-		matchIdx:  map[NodeID]uint64{},
-		lastAck:   map[NodeID]uint64{},
+		votesRecv:    map[NodeID]bool{},
+		preVotes:     map[NodeID]bool{},
+		nextIdx:      map[NodeID]uint64{},
+		matchIdx:     map[NodeID]uint64{},
+		lastAck:      map[NodeID]uint64{},
+		removedPeers: map[NodeID]uint64{},
 	}
 	// 崩溃恢复：以持久化状态为唯一依据。
 	// 成员集推导：无快照时以 Config.Peers 为引导基线，有快照时以快照为准，
@@ -98,6 +104,8 @@ func NewNode(cfg Config, storage Storage, net Transport, apply ApplyFunc) *Node 
 		n.log = cloneLog(st.Log)
 	}
 	n.recomputeMembershipLocked()
+	// 已提交位点重启后为快照点，对应成员集即快照成员集。
+	n.committedMember = n.snapMember.clone()
 	// 已被移除的节点（持久化配置中不含自己）转为完全被动：
 	// 不参与选举、不响应消息，避免旧节点干扰集群。
 	if len(n.membership.Voters)+len(n.membership.Learners) > 0 && !n.membership.Contains(n.id) {
@@ -143,7 +151,8 @@ func (n *Node) LastError() error {
 func (n *Node) majority() int { return n.membership.Majority() }
 
 // recomputeMembershipLocked 由快照成员集 + 日志中的变更条目重放当前成员集。
-// 日志追加、截断、快照安装后都必须调用，保证成员视图与日志严格一致。
+// 变更条目携带完整成员集，取最后一条即可；日志追加、截断、
+// 快照安装后都必须调用，保证成员视图与日志严格一致。
 func (n *Node) recomputeMembershipLocked() {
 	m := n.snapMember.clone()
 	pending := uint64(0)
@@ -151,8 +160,8 @@ func (n *Node) recomputeMembershipLocked() {
 		if e.Type != EntryConfChange {
 			continue
 		}
-		if cc, err := decodeConfChange(e.Data); err == nil {
-			m.apply(cc)
+		if fm, err := decodeMembership(e.Data); err == nil {
+			m = fm
 			pending = e.Index
 		}
 	}
@@ -225,6 +234,15 @@ func (n *Node) Tick() {
 		if n.activeVoters() < n.majority() {
 			n.becomeFollower(n.term)
 			n.lastErr = ErrNoMajority
+		}
+		// 被移除节点的通知宽限期到期后停止复制。
+		for id, stop := range n.removedPeers {
+			if stop != 0 && n.tick >= stop {
+				delete(n.removedPeers, id)
+				delete(n.nextIdx, id)
+				delete(n.matchIdx, id)
+				delete(n.lastAck, id)
+			}
 		}
 		return
 	}
@@ -360,6 +378,7 @@ func (n *Node) maybeBecomeLeader() {
 	}
 	n.role = Leader
 	n.heartbeatEl = 0
+	n.removedPeers = map[NodeID]uint64{} // 新领导者不继承旧的移除通知状态
 	last := n.lastLogIndex()
 	for id := range n.membership.Voters {
 		n.nextIdx[id] = last + 1
@@ -615,11 +634,31 @@ func (n *Node) applyCommitted() {
 		n.lastApply = idx
 		switch e.Type {
 		case EntryConfChange:
+			// 变更条目携带完整成员集；与上一个已提交配置对比得出被移除者。
+			fm, err := decodeMembership(e.Data)
+			if err != nil {
+				continue
+			}
+			prev := n.committedMember
+			n.committedMember = fm
 			// 本节点被移除的配置已提交：立即退出领导/选举，转为完全被动。
-			if cc, err := decodeConfChange(e.Data); err == nil &&
-				cc.Type == ConfRemove && cc.NodeID == n.id {
+			if !fm.Contains(n.id) {
 				n.removed = true
 				n.role = Follower
+			}
+			// 领导者：被移除节点进入通知宽限期，到期后停止复制。
+			if n.role == Leader {
+				grace := n.tick + uint64(2*n.cfg.ElectionTimeout)
+				for id := range prev.Voters {
+					if !fm.Contains(id) && id != n.id {
+						n.removedPeers[id] = grace
+					}
+				}
+				for id := range prev.Learners {
+					if !fm.Contains(id) && id != n.id {
+						n.removedPeers[id] = grace
+					}
+				}
 			}
 		default:
 			// Data 为 nil 的是 no-op 条目，不下发给状态机。
@@ -638,6 +677,12 @@ func (n *Node) broadcastAppend() {
 	}
 	for id := range n.membership.Learners {
 		n.sendAppendTo(id)
+	}
+	// 通知期内的被移除节点：继续复制直到其得知移除结果。
+	for id := range n.removedPeers {
+		if !n.membership.Contains(id) {
+			n.sendAppendTo(id)
+		}
 	}
 }
 
@@ -721,6 +766,7 @@ func (n *Node) handleInstallSnapshot(m Message) {
 	n.snapTerm = snap.LastIncludedTerm
 	// 快照携带快照点的成员配置；保留后缀中的变更条目在其上重放。
 	n.snapMember = membershipFromLists(snap.Voters, snap.Learners)
+	n.committedMember = n.snapMember.clone()
 	n.recomputeMembershipLocked()
 	n.persist()
 	if n.commitIdx < n.snapIndex {
@@ -766,15 +812,15 @@ func (n *Node) Compact(upto uint64, data []byte) (*Snapshot, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: no entry at %d", ErrLogInconsistent, upto)
 	}
-	// 快照记录 upto 位点对应的成员配置（重放 [snapIndex, upto] 内的变更条目）。
+	// 快照记录 upto 位点对应的成员配置（取该位点之前最后一条变更条目）。
 	m := n.snapMember.clone()
 	for _, e := range n.log {
 		if e.Index > upto {
 			break
 		}
 		if e.Type == EntryConfChange {
-			if cc, err := decodeConfChange(e.Data); err == nil {
-				m.apply(cc)
+			if fm, err := decodeMembership(e.Data); err == nil {
+				m = fm
 			}
 		}
 	}

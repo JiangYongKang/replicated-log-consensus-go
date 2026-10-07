@@ -7,13 +7,14 @@ import (
 
 // cluster 测试集群：通过可控网络驱动消息，逐 tick 推进。
 type cluster struct {
-	t        *testing.T
-	net      *Network
-	storages map[NodeID]*MemoryStorage
-	nodes    map[NodeID]*Node
-	applied  map[NodeID][]string // 各节点状态机已应用的命令（按序）
-	snaps    map[NodeID][]byte   // 各节点状态机已安装的快照
-	ids      []NodeID
+	t         *testing.T
+	net       *Network
+	storages  map[NodeID]*MemoryStorage
+	nodes     map[NodeID]*Node
+	applied   map[NodeID][]string // 各节点状态机已应用的命令（按序）
+	snaps     map[NodeID][]byte   // 各节点状态机已安装的快照
+	ids       []NodeID
+	bootPeers []NodeID // 初始成员（仅用于无任何持久化状态时的引导）
 }
 
 func newCluster(t *testing.T, n int) *cluster {
@@ -31,17 +32,27 @@ func newCluster(t *testing.T, n int) *cluster {
 		c.ids = append(c.ids, id)
 		c.storages[id] = NewMemoryStorage()
 	}
+	c.bootPeers = append([]NodeID(nil), c.ids...)
 	for _, id := range c.ids {
 		c.startNode(id)
 	}
 	return c
 }
 
+// join 以空配置启动一个全新的节点（等待通过成员变更加入集群）。
+func (c *cluster) join(id NodeID) {
+	c.ids = append(c.ids, id)
+	c.storages[id] = NewMemoryStorage()
+	c.startNodeWithPeers(id, nil)
+}
+
 // startNode 用同一存储（重）建节点，模拟启动或崩溃恢复。
-func (c *cluster) startNode(id NodeID) {
+func (c *cluster) startNode(id NodeID) { c.startNodeWithPeers(id, c.bootPeers) }
+
+func (c *cluster) startNodeWithPeers(id NodeID, peers []NodeID) {
 	cfg := Config{
 		ID:               id,
-		Peers:            c.ids,
+		Peers:            peers,
 		ElectionTimeout:  10 + indexOf(c.ids, id)*5, // 错峰超时，保证选举确定性
 		HeartbeatTimeout: 2,
 	}
