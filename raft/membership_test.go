@@ -575,3 +575,81 @@ func TestSnapshotCarriesMembership(t *testing.T) {
 	c.checkMembershipConverged()
 	t.Logf("n4 joined via snapshot: voters=%v", voters)
 }
+
+// TestSimultaneousStartElectsQuickly 多节点同时启动、配置一致时，
+// 应在合理时间内选出唯一领导者；短暂心跳抖动不得引发换主。
+func TestSimultaneousStartElectsQuickly(t *testing.T) {
+	c := newCluster(t, 5)
+	l := c.waitLeader(40) // 5 节点最大选举超时 30，预投票一轮内须完成
+	if l == "" {
+		t.Fatal("no leader")
+	}
+	_, term := c.nodes[l].State()
+	t.Logf("5-node simultaneous start: leader=%s term=%d", l, term)
+	// 注入心跳抖动：丢掉两轮心跳（远小于选举超时），领导者必须保持稳定。
+	for i := 0; i < 4; i++ {
+		for c.net.DropFirst() {
+		}
+		c.step()
+	}
+	c.steps(3)
+	if got := c.leader(); got != l {
+		t.Fatalf("leader changed after brief heartbeat loss: %s -> %s", l, got)
+	}
+	if _, term2 := c.nodes[l].State(); term2 != term {
+		t.Fatalf("term changed after heartbeat jitter: %d -> %d", term, term2)
+	}
+	c.steps(10)
+	c.checkSameTermSingleLeader()
+	t.Logf("leader stable through heartbeat jitter: %s term=%d", l, term)
+}
+
+// TestCommittedWriteSurvivesFullRestart 被多数派确认的写入，
+// 在全部节点崩溃重启后仍然存在且按序重放。
+func TestCommittedWriteSurvivesFullRestart(t *testing.T) {
+	c := newCluster(t, 3)
+	l := c.waitLeader(30)
+	for i := 0; i < 4; i++ {
+		if _, _, err := c.nodes[l].Propose([]byte(fmt.Sprintf("durable-%d", i))); err != nil {
+			t.Fatal(err)
+		}
+		c.steps(3)
+	}
+	// 做一次成员变更，确认变更后的配置同样耐重启。
+	c.join("n4")
+	if _, err := c.nodes[l].AddNode("n4"); err != nil {
+		t.Fatal(err)
+	}
+	c.steps(20)
+	if _, _, err := c.nodes[l].Propose([]byte("durable-4")); err != nil {
+		t.Fatal(err)
+	}
+	c.steps(5)
+	// 全部节点崩溃并重启（存储保留）。
+	for _, id := range c.ids {
+		c.crash(id)
+	}
+	for _, id := range c.ids {
+		c.restart(id)
+	}
+	c.steps(30)
+	c.checkSameTermSingleLeader()
+	c.checkMembershipConverged()
+	// 已确认写入在重启后重新提交并应用，不丢不重。
+	c.steps(5)
+	c.checkAppliedConsistent()
+	l2 := c.leader()
+	if l2 == "" {
+		t.Fatal("no leader after full restart")
+	}
+	if got := len(c.applied[l2]); got != 5 {
+		t.Fatalf("leader applied %d entries after full restart, want 5", got)
+	}
+	for i, want := range []string{"durable-0", "durable-1", "durable-2", "durable-3", "durable-4"} {
+		if c.applied[l2][i] != want {
+			t.Fatalf("applied[%d]=%q, want %q", i, c.applied[l2][i], want)
+		}
+	}
+	t.Logf("all committed writes survived full cluster restart: leader=%s applied=%v",
+		l2, c.applied[l2])
+}
