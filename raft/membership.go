@@ -241,6 +241,7 @@ func (n *Node) proposeConfChangeLocked(cc ConfChange) (uint64, error) {
 	n.applyMembershipLocked(newM, cc, e.Index)
 	n.persist()
 	n.broadcastAppend()
+	n.advanceCommit() // 单节点集群：自己即多数派，立即推进提交
 	return e.Index, nil
 }
 
@@ -261,6 +262,11 @@ func (n *Node) applyMembershipLocked(newM Membership, cc ConfChange, index uint6
 				// 继续向被移除节点复制一段时间，让它得知结果并转入被动，
 				// 而不是无声断连后一直预投票骚扰集群。
 				n.removedPeers[cc.NodeID] = 0 // 0 = 移除尚未提交
+				if _, ok := n.nextIdx[cc.NodeID]; !ok {
+					n.nextIdx[cc.NodeID] = n.lastLogIndex() + 1
+					n.matchIdx[cc.NodeID] = 0
+					n.lastAck[cc.NodeID] = n.tick
+				}
 			}
 		}
 	}

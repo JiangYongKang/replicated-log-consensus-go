@@ -158,21 +158,28 @@ func (c *cluster) checkSameTermSingleLeader() {
 	}
 }
 
-// checkAppliedConsistent 断言所有节点已应用前缀一致（无偏移、无丢失）。
+// checkAppliedConsistent 断言所有存活且未被移除的节点已应用前缀一致（无偏移、无丢失）。
+// 被移除的节点不再接收新条目，其状态机允许落后，不参与比较。
 func (c *cluster) checkAppliedConsistent() {
-	var base []string
-	var baseID NodeID
+	baseID := NodeID("")
+	baseLen := -1
 	for _, id := range c.ids {
-		if _, ok := c.nodes[id]; !ok {
+		n, ok := c.nodes[id]
+		if !ok || n.Removed() {
 			continue
 		}
-		if base == nil || len(c.applied[id]) < len(base) {
-			base = c.applied[id]
+		if baseLen < 0 || len(c.applied[id]) < baseLen {
+			baseLen = len(c.applied[id])
 			baseID = id
 		}
 	}
+	if baseLen < 0 {
+		return
+	}
+	base := c.applied[baseID]
 	for _, id := range c.ids {
-		if _, ok := c.nodes[id]; !ok {
+		n, ok := c.nodes[id]
+		if !ok || n.Removed() {
 			continue
 		}
 		a := c.applied[id]

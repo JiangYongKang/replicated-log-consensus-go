@@ -417,6 +417,7 @@ func (n *Node) Propose(data []byte) (index uint64, term uint64, err error) {
 	n.matchIdx[n.id] = e.Index
 	n.persist()
 	n.broadcastAppend()
+	n.advanceCommit() // 单节点集群：自己即多数派，立即推进提交
 	return e.Index, e.Term, nil
 }
 
@@ -427,10 +428,14 @@ func (n *Node) Handle(msg Message) {
 	if n.removed {
 		return // 已被移除：不再响应任何消息
 	}
-	// 投票租约：刚收到过有效领导者消息时，拒绝投票类请求且不抬升任期。
-	// 这样被移除/分区节点即使用高任期四处拉票，也无法打断活跃领导者。
-	if (msg.Type == MsgRequestVote || msg.Type == MsgPreVote) &&
-		n.leaderID != "" && n.electionEl < n.leaseTicks() {
+	// 投票租约：刚收到过有效领导者消息时，拒绝投票类请求且不抬升任期；
+	// 领导者自身在多数派活跃时同样拒绝——被移除/分区节点即使用高任期
+	// 四处拉票，也无法打断活跃领导者。
+	leaseActive := n.leaderID != "" && n.electionEl < n.leaseTicks()
+	if n.role == Leader && n.activeVoters() >= n.majority() {
+		leaseActive = true
+	}
+	if (msg.Type == MsgRequestVote || msg.Type == MsgPreVote) && leaseActive {
 		respType := MsgRequestVoteResp
 		if msg.Type == MsgPreVote {
 			respType = MsgPreVoteResp
@@ -641,22 +646,33 @@ func (n *Node) applyCommitted() {
 			}
 			prev := n.committedMember
 			n.committedMember = fm
-			// 本节点被移除的配置已提交：立即退出领导/选举，转为完全被动。
-			if !fm.Contains(n.id) {
+			// 本节点从已提交配置中被移除：立即退出领导/选举，转为完全被动。
+			// 注意必须同时满足"之前是成员"：后加入的节点重放历史配置时，
+			// 早期配置自然不含它，不能误判为被移除。
+			if prev.Contains(n.id) && !fm.Contains(n.id) {
 				n.removed = true
 				n.role = Follower
 			}
 			// 领导者：被移除节点进入通知宽限期，到期后停止复制。
 			if n.role == Leader {
 				grace := n.tick + uint64(2*n.cfg.ElectionTimeout)
+				notify := func(id NodeID) {
+					n.removedPeers[id] = grace
+					// 重启后的领导者复制状态是内存态，需要重新初始化。
+					if _, ok := n.nextIdx[id]; !ok {
+						n.nextIdx[id] = n.lastLogIndex() + 1
+						n.matchIdx[id] = 0
+						n.lastAck[id] = n.tick
+					}
+				}
 				for id := range prev.Voters {
 					if !fm.Contains(id) && id != n.id {
-						n.removedPeers[id] = grace
+						notify(id)
 					}
 				}
 				for id := range prev.Learners {
 					if !fm.Contains(id) && id != n.id {
-						n.removedPeers[id] = grace
+						notify(id)
 					}
 				}
 			}
