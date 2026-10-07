@@ -64,7 +64,7 @@ func TestCorruptSnapshotRejected(t *testing.T) {
 		f = c.ids[2]
 	}
 	_, term := c.nodes[l].State()
-	bad := NewSnapshot(5, 1, []byte("tampered"))
+	bad := NewSnapshot(5, 1, []byte("tampered"), nil, nil)
 	bad.Data = []byte("corrupted") // 篡改数据但不重算校验和
 	commitBefore := c.nodes[f].Committed()
 	c.nodes[f].Handle(Message{
@@ -77,7 +77,7 @@ func TestCorruptSnapshotRejected(t *testing.T) {
 		t.Fatalf("corrupt snapshot changed commit: %d -> %d", commitBefore, got)
 	}
 	// 重试一条完好的快照应被接受。
-	good := NewSnapshot(5, 1, []byte("valid-state"))
+	good := NewSnapshot(5, 1, []byte("valid-state"), nil, nil)
 	c.nodes[f].Handle(Message{
 		Type: MsgInstallSnapshot, From: l, To: f, Term: term, Snapshot: good,
 	})
@@ -89,7 +89,7 @@ func TestCorruptSnapshotRejected(t *testing.T) {
 
 // TestSnapshotVersionMismatch 版本不符的快照必须被拒绝。
 func TestSnapshotVersionMismatch(t *testing.T) {
-	s := NewSnapshot(3, 1, []byte("v"))
+	s := NewSnapshot(3, 1, []byte("v"), nil, nil)
 	s.Version = 999
 	if err := s.Valid(); !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("expected ErrVersionMismatch, got %v", err)
@@ -103,7 +103,7 @@ func TestSnapshotVersionMismatch(t *testing.T) {
 		t.Fatalf("decode: expected ErrSnapshotCorrupt, got %v", err)
 	}
 	// 正常往返。
-	ok := NewSnapshot(3, 1, []byte("round-trip"))
+	ok := NewSnapshot(3, 1, []byte("round-trip"), nil, nil)
 	b, err := ok.Encode()
 	if err != nil {
 		t.Fatal(err)

@@ -18,4 +18,8 @@ var (
 	ErrVersionMismatch = errors.New("raft: snapshot version mismatch")
 	// ErrCompacted 请求的条目已被快照回收。
 	ErrCompacted = errors.New("raft: log compacted")
+	// ErrInvalidConfChange 成员变更本身不合法（如重复添加、移除不存在的节点）。
+	ErrInvalidConfChange = errors.New("raft: invalid conf change")
+	// ErrConfChangeInProgress 上一个成员变更尚未提交，拒绝并发变更。
+	ErrConfChangeInProgress = errors.New("raft: conf change in progress")
 )

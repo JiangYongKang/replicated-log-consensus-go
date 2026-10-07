@@ -62,12 +62,18 @@ func (m *MemoryStorage) LoadState() (PersistentState, bool, error) {
 	return s, true, nil
 }
 
+func cloneSnapshot(s *Snapshot) *Snapshot {
+	cp := *s
+	cp.Data = append([]byte(nil), s.Data...)
+	cp.Voters = append([]NodeID(nil), s.Voters...)
+	cp.Learners = append([]NodeID(nil), s.Learners...)
+	return &cp
+}
+
 func (m *MemoryStorage) SaveSnapshot(s *Snapshot) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := *s
-	cp.Data = append([]byte(nil), s.Data...)
-	m.snap = &cp
+	m.snap = cloneSnapshot(s)
 	m.hasSnap = true
 	return nil
 }
@@ -78,7 +84,5 @@ func (m *MemoryStorage) LoadSnapshot() (*Snapshot, bool, error) {
 	if !m.hasSnap {
 		return nil, false, nil
 	}
-	cp := *m.snap
-	cp.Data = append([]byte(nil), m.snap.Data...)
-	return &cp, true, nil
+	return cloneSnapshot(m.snap), true, nil
 }
